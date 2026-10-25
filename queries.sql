@@ -42,12 +42,14 @@ SELECT
     director,
     COUNT(*) AS total_movies
 FROM movies
-WHERE director IS NOT NULL
+WHERE api_found = 1
+  AND director IS NOT NULL
   AND TRIM(director) <> ''
   AND director <> 'N/A'
 GROUP BY director
 ORDER BY total_movies DESC, director ASC
 LIMIT 1;
+
 
 
 -- =========================================================

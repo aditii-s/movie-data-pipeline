@@ -38,7 +38,6 @@ def extract_data():
 
 # ---------------- Transform ----------------
 
-
 def parse_title(title):
     title = str(title).strip()
 
@@ -60,7 +59,7 @@ def parse_title(title):
         flags=re.IGNORECASE
     ).strip()
 
-    # Convert MovieLens titles such as "American President, The"
+    # Convert titles such as "American President, The"
     # into "The American President".
     article_match = re.match(
         r"^(.*),\s*(The|A|An)$",
@@ -75,6 +74,7 @@ def parse_title(title):
 
     return clean_title, release_year
 
+
 def transform_movies(movies):
     movies = movies.copy()
 
@@ -83,7 +83,7 @@ def transform_movies(movies):
     movies["release_year"] = parsed.apply(lambda item: item[1])
 
     movies["decade"] = movies["release_year"].apply(
-        lambda year: f"{(year // 10) * 10}s"
+        lambda year: f"{(int(year) // 10) * 10}s"
         if pd.notna(year) else None
     )
 
@@ -106,8 +106,9 @@ def transform_ratings(ratings, valid_movie_ids):
     ratings["movieId"] = ratings["movieId"].astype(int)
     ratings["timestamp"] = ratings["timestamp"].astype(int)
 
-    # Keep ratings only for movies present in the movies dataset.
-    ratings = ratings[ratings["movieId"].isin(valid_movie_ids)]
+    ratings = ratings[
+        ratings["movieId"].isin(valid_movie_ids)
+    ]
 
     return ratings.drop_duplicates()
 
@@ -127,7 +128,9 @@ def split_genres(movies):
 
             if genre:
                 genre_names.add(genre)
-                relationships.append((int(row["movieId"]), genre))
+                relationships.append(
+                    (int(row["movieId"]), genre)
+                )
 
     return sorted(genre_names), relationships
 
@@ -143,7 +146,10 @@ def enrich_movie(title, year, session, cache):
     if not API_KEY:
         return {}
 
-    params = {"apikey": API_KEY, "t": title}
+    params = {
+        "apikey": API_KEY,
+        "t": title
+    }
 
     if year:
         params["y"] = year
@@ -176,8 +182,10 @@ def enrich_movie(title, year, session, cache):
         time.sleep(0.1)
         return result
 
-    except requests.RequestException as error:
-        logging.warning("OMDb request failed for %s: %s", title, error)
+    except (requests.RequestException, ValueError) as error:
+        logging.warning(
+            "OMDb request failed for %s: %s", title, error
+        )
         return {}
 
 
@@ -199,12 +207,17 @@ def load_cache():
             }
 
         return cache
+
     except (OSError, ValueError, KeyError):
-        logging.warning("Could not read OMDb cache; starting a new cache")
+        logging.warning(
+            "Could not read OMDb cache; starting a new cache"
+        )
         return {}
 
 
 def save_cache(cache):
+    CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+
     rows = []
 
     for key, value in cache.items():
@@ -220,8 +233,12 @@ def save_cache(cache):
     pd.DataFrame(
         rows,
         columns=[
-            "cache_key", "imdb_id", "director",
-            "plot", "box_office", "api_found"
+            "cache_key",
+            "imdb_id",
+            "director",
+            "plot",
+            "box_office",
+            "api_found"
         ]
     ).to_csv(CACHE_PATH, index=False)
 
@@ -336,6 +353,7 @@ def load_data(connection, movies, ratings, genres, relationships):
     )
 
 
+# ---------------- Main ETL pipeline ----------------
 
 def main():
     movies, ratings = extract_data()
@@ -354,23 +372,43 @@ def main():
         enriched = []
 
         if API_KEY:
-            logging.info("OMDb key found; testing enrichment on 3 movies")
+            batch_size = max(
+                0, int(os.getenv("OMDB_BATCH_SIZE", "25"))
+            )
+            new_requests = 0
 
-            for _, row in movies.head(3).iterrows():
-                result = enrich_movie(
-                    row["clean_title"],
+            logging.info(
+                "OMDb key found; request limit for this run: %s",
+                batch_size
+            )
+
+            for _, row in movies.iterrows():
+                year = (
                     int(row["release_year"])
                     if pd.notna(row["release_year"])
-                    else None,
-                    session,
-                    cache
+                    else None
                 )
+                cache_key = f"{row['clean_title']}|{year or ''}"
+
+                if cache_key in cache:
+                    result = cache[cache_key]
+                elif new_requests < batch_size:
+                    result = enrich_movie(
+                        row["clean_title"],
+                        year,
+                        session,
+                        cache
+                    )
+                    new_requests += 1
+                else:
+                    result = {}
+
                 enriched.append(result)
 
-            # Do not make API calls for the remaining movies.
-            enriched.extend(
-                [{} for _ in range(len(movies) - len(enriched))]
+            logging.info(
+                "New OMDb requests attempted: %s", new_requests
             )
+
         else:
             logging.warning(
                 "OMDB_API_KEY is missing. Loading without OMDb enrichment."
@@ -381,14 +419,15 @@ def main():
             enriched, index=movies.index
         )
 
-        for column in [
+        columns = [
             "imdb_id", "director", "plot", "box_office", "api_found"
-        ]:
-            if column in enrichment_frame.columns:
-                movies[column] = enrichment_frame[column]
-            else:
-                movies[column] = None
+        ]
 
+        for column in columns:
+            if column not in enrichment_frame.columns:
+                enrichment_frame[column] = None
+
+        movies[columns] = enrichment_frame[columns]
         movies["api_found"] = (
             movies["api_found"].fillna(0).astype(int)
         )
@@ -403,7 +442,11 @@ def main():
 
             with connection:
                 load_data(
-                    connection, movies, ratings, genres, relationships
+                    connection,
+                    movies,
+                    ratings,
+                    genres,
+                    relationships
                 )
 
             logging.info("ETL pipeline completed successfully")
@@ -415,6 +458,13 @@ def main():
                     f"SELECT COUNT(*) FROM {table}"
                 ).fetchone()[0]
                 logging.info("%s: %s rows", table, count)
+
+            enriched_count = connection.execute(
+                "SELECT COUNT(*) FROM movies WHERE api_found = 1"
+            ).fetchone()[0]
+            logging.info(
+                "Movies with OMDb metadata: %s", enriched_count
+            )
 
         finally:
             connection.close()
