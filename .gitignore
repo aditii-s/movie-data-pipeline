@@ -1,0 +1,24 @@
+
+# Secrets and environment variables
+.env
+.env.*
+
+# Python virtual environment
+venv/
+.venv/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+
+# SQLite database files
+*.db
+*.db-journal
+
+# Generated OMDb cache
+data/omdb_cache.csv
+
+# Editor and operating system files
+.vscode/
+.DS_Store
+Thumbs.db
